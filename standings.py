@@ -1,16 +1,58 @@
+# Copyright © 2018 Po Huit
+# [This program is licensed under the "MIT License"]
+# Please see the file LICENSE in the source
+# distribution of this software for license terms.
+
+# Demo of command-line ESI SSO auth.
+# Follows https://developers.eveonline.com/blog/article/
+#   sso-to-authenticated-calls
+
 import http.server
+import urllib.request
 import socketserver
-import urllib.parse as parse
+import urllib.parse
 import webbrowser
 import threading
-import os
+import json
+import random
+import base64
+from sys import stderr
+
+client_data = None
+with open("client-data", "r") as f:
+    client_data = json.load(f)
 
 PORT = 3133
 auth_code = None
-state = str(os.getpid())
-client_id = None
-with open("client-id", "r") as f:
-    client_id = f.read().strip()
+state = str(random.getrandbits(128))
+client_id = client_data['client-id']
+client_secret = client_data['client-secret']
+
+def http_request(path, data=None, headers={}):
+    "Make an HTTP request and return the resulting parsed JSON."
+    headers['Content-Type'] = "application/json"
+    if data != None:
+        data = json.dumps(data)
+        print("data:", data)
+        data = data.encode('utf-8')
+    request = urllib.request.Request(path,
+                                     data=data,
+                                     headers=headers,
+                                     method='POST')
+    try:
+        response = urllib.request.urlopen(request)
+        if response.status == 200:
+            try:
+                return json.load(response)
+            except json.decoder.JSONDecodeError as e:
+                print("json error: ", e, file=stderr)
+        else:
+            print("bad response status: ", response.status, file=stderr)
+    except urllib.error.URLError as e:
+        print("http error: ", e.code, file=stderr)
+    print("fetch failed for", path, file=stderr)
+    exit(1)
+
 
 class MyHandler(http.server.BaseHTTPRequestHandler):
     def my_respond(self, code, body):
@@ -24,11 +66,11 @@ class MyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         global auth_code, state
-        req = parse.urlparse(self.path)
+        req = urllib.parse.urlparse(self.path)
         if req == None or req.path != "/":
             self.my_respond(400, "Bad Request " + self.path)
             return
-        query = parse.parse_qs(req.query)
+        query = urllib.parse.parse_qs(req.query)
         if query == None or 'code' not in query:
             self.my_respond(400, "Bad Request Query" + self.path)
             return
@@ -64,3 +106,14 @@ if auth_code == None:
     print("Could not get auth code")
     exit(1)
 print("auth code:", auth_code)
+
+def base64encode(s):
+    return base64.standard_b64encode(s.encode('utf-8')).decode('utf-8')
+
+client_data = base64encode(client_id + ":" + client_secret)
+req = { 'grant_type' : "authorization_code",
+        'code' : auth_code }
+auth_info = http_request("https://login.eveonline.com/oauth/token",
+                         data=req,
+                         headers={'Authorization' : "Basic " + client_data})
+print(auth_info)
