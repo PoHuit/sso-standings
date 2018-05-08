@@ -16,25 +16,54 @@ import threading
 import json
 import random
 import base64
-from sys import stderr
+import csv
+from sys import stdout, stderr
 
+# The ergonomics of Python's base64 module pretty much suck.
+# Here's a wrapper for our use case.
+def base64encode(s):
+    "String-to-string base64 encoding."
+    return base64.standard_b64encode(s.encode('ascii')).decode('ascii')
+
+# You need to have client data from your CCP registration.
+# Should be JSON in the form
+#   { "client-id" : "MYCLIENTID", "client-secret" : "MYCLIENTSECRET" }
+# The capitalized stuff comes from
+# https://developers.eveonline.com/applications; see the
+# tutorial for details about setting this up. Make sure your
+# client-data file is mode 600. Do not distribute this file.
 client_data = None
 with open("client-data", "r") as f:
     client_data = json.load(f)
-
-PORT = 3133
-auth_code = None
-state = str(random.getrandbits(128))
 client_id = client_data['client-id']
 client_secret = client_data['client-secret']
 
+# Port on localhost given as a callback when your app was
+# registered.  Can be any random number between 1024 and
+# 65535 that doesn't happen to conflict with somebody.
+PORT = 3133
+# Single-use short-expiry authorization code to be retrieved
+# from CCP if needed by our local one-off webservice.
+auth_code = None
+# Nonce to ensure that two copies of our code running on the
+# same port at the same time won't get confused by a data race.
+state = str(random.getrandbits(128))
+
+# This fancy wrapper is essentially our version of 'curl'
+# from the tutorial. The data argument is expected to be a
+# Python object, and headers a Python dictionary.  This
+# function does a POST if data is provided and a GET
+# otherwise: all in JSON.
 def http_request(path, data=None, headers={}):
     "Make an HTTP request and return the resulting parsed JSON."
+
+    # Set up the arguments.
     headers['Content-Type'] = "application/json"
     if data != None:
         data = json.dumps(data)
-        print("data:", data)
         data = data.encode('utf-8')
+
+    # Actually run the request.
     request = urllib.request.Request(path,
                                      data=data,
                                      headers=headers)
@@ -54,7 +83,11 @@ def http_request(path, data=None, headers={}):
 
 
 class MyHandler(http.server.BaseHTTPRequestHandler):
+    "Single-request webserver used get the authentication code."
+
+    # XXX Formatting is terrible.
     def my_respond(self, code, body):
+        "Send a generic response."
         self.send_response(code)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
@@ -64,14 +97,18 @@ class MyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body_html)
 
     def do_GET(self):
+        """Handle the GET request from the browser after
+        redirection from CCP's auth server."""
         global auth_code, state
         req = urllib.parse.urlparse(self.path)
         if req == None or req.path != "/":
             self.my_respond(400, "Bad Request " + self.path)
             return
+        # XXX Note that parse_qs() returns a dictionary
+        # whose values are lists.
         query = urllib.parse.parse_qs(req.query)
         if query == None or 'code' not in query:
-            self.my_respond(400, "Bad Request Query" + self.path)
+            self.my_respond(400, "Bad request " + self.path)
             return
         if 'state' not in query or query['state'][0] != state:
             self.my_respond(409, "Race with other client: please retry")
@@ -79,18 +116,22 @@ class MyHandler(http.server.BaseHTTPRequestHandler):
         auth_code = query['code'][0]
         self.my_respond(200, auth_code)
 
+
+    def log_message(self, format, *args):
+        "Silence the log messages from the server."
+        return
+
+# The thread worker to run the request server.
 def worker():
-    global PORT
     # https://brokenbad.com/address-reuse-in-pythons-socketserver/
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), MyHandler) as httpd:
-        print("serving at port", PORT)
         httpd.handle_request()
 
-print("starting webserver")
+# Get the authentication code from which the initial
+# authorization tokens can be derived.
 webserver = threading.Thread(target=worker)
 webserver.start()
-print("opening browser")
 authurl = "https://login.eveonline.com/oauth/authorize?" + \
           "response_type=code&" + \
           "redirect_uri=http://localhost:{}&" + \
@@ -99,30 +140,30 @@ authurl = "https://login.eveonline.com/oauth/authorize?" + \
           "state={}"
 authurl = authurl.format(PORT, client_id, state)
 webbrowser.open(authurl)
-print("gathering code")
 webserver.join()
 if auth_code == None:
-    print("Could not get auth code")
+    print("Could not get auth code", file=stderr)
     exit(1)
 
-def base64encode(s):
-    return base64.standard_b64encode(s.encode('utf-8')).decode('utf-8')
-
+# Get the auth info associated with this auth code.
 client_data = base64encode(client_id + ":" + client_secret)
 req = { 'grant_type' : "authorization_code",
         'code' : auth_code }
 auth_info = http_request("https://login.eveonline.com/oauth/token",
                          data=req,
                          headers={'Authorization' : "Basic " + client_data})
-print('auth_info:', auth_info)
 
+# Get the character info associated with this access token.
 access_token = auth_info['access_token']
 char_info = http_request("https://login.eveonline.com/oauth/verify",
                          headers={'Authorization' : "Bearer " + access_token})
-print('char_info:', char_info)
 
+# Get the standings of the authenticated character.
 standings = http_request("https://esi.tech.ccp.is/v1/characters/{}/standings"
                          .format(char_info['CharacterID']),
                          headers={'Authorization' : "Bearer " + access_token})
 
-print(standings)
+# Format standings as CSV for "convenience".
+writer = csv.writer(stdout)
+for s in standings:
+    writer.writerow((s['from_id'], s['from_type'], s['standing']))
