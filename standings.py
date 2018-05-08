@@ -37,8 +37,7 @@ def http_request(path, data=None, headers={}):
         data = data.encode('utf-8')
     request = urllib.request.Request(path,
                                      data=data,
-                                     headers=headers,
-                                     method='POST')
+                                     headers=headers)
     try:
         response = urllib.request.urlopen(request)
         if response.status == 200:
@@ -105,7 +104,6 @@ webserver.join()
 if auth_code == None:
     print("Could not get auth code")
     exit(1)
-print("auth code:", auth_code)
 
 def base64encode(s):
     return base64.standard_b64encode(s.encode('utf-8')).decode('utf-8')
@@ -116,4 +114,15 @@ req = { 'grant_type' : "authorization_code",
 auth_info = http_request("https://login.eveonline.com/oauth/token",
                          data=req,
                          headers={'Authorization' : "Basic " + client_data})
-print(auth_info)
+print('auth_info:', auth_info)
+
+access_token = auth_info['access_token']
+char_info = http_request("https://login.eveonline.com/oauth/verify",
+                         headers={'Authorization' : "Bearer " + access_token})
+print('char_info:', char_info)
+
+standings = http_request("https://esi.tech.ccp.is/v1/characters/{}/standings"
+                         .format(char_info['CharacterID']),
+                         headers={'Authorization' : "Bearer " + access_token})
+
+print(standings)
